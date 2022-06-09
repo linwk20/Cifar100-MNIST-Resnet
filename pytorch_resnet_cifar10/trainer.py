@@ -14,6 +14,10 @@ import torchvision.datasets as datasets
 from torch.utils.tensorboard import SummaryWriter
 import resnet
 
+from torchvision.transforms.autoaugment import AutoAugmentPolicy, AutoAugment
+
+
+
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("resnet")
@@ -32,16 +36,18 @@ parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=128, type=int,
+parser.add_argument('-b', '--batch_size', default=128, type=int,
                     metavar='N', help='mini-batch size (default: 128)')
-parser.add_argument('--lr', '--learning-rate', default=4e-3, type=float,
+parser.add_argument('--lr', '--learning-rate', default=1e-1, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
-parser.add_argument('--weight_decay', '--wd', default=0.05, type=float,
+parser.add_argument('--weight_decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
-parser.add_argument('--print-freq', '-p', default=50, type=int,
+parser.add_argument('--print_freq', '-p', default=50, type=int,
                     metavar='N', help='print frequency (default: 50)')
+parser.add_argument('--width', '-w', default=1, type=int,
+                    metavar='N', help=' width_factor (default: 1)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
@@ -50,12 +56,16 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
 parser.add_argument('--half', dest='half', action='store_true',
                     help='use half-precision(16-bit) ')
-parser.add_argument('--save-dir', dest='save_dir',
+parser.add_argument('--save_dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
-parser.add_argument('--save-every', dest='save_every',
+parser.add_argument('--save_every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
-                    type=int, default=10)
+                    type=int, default=50)
+parser.add_argument('--dataset', default='CIFAR100', type=str,
+                    help='data_to_use')
+parser.add_argument('--Strong_Aug', default=False, action='store_true',
+                    help='use Strong_Aug ')
 best_prec1 = 0
 
 
@@ -63,12 +73,20 @@ def main():
     global args, best_prec1
     args = parser.parse_args()
 
+    torch.manual_seed(0)
 
+    args.save_dir = args.save_dir + args.dataset + "wd=" + str(args.weight_decay) + "sa=" + str(args.Strong_Aug) + "MaxLR=" + str(args.lr) + "epochs=" + str(args.epochs)
     # Check the save_dir exists or not
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
+    if args.dataset == "CIFAR100":
+        classes = 100
+        in_channel = 3
+    else:
+        classes = 10
+        in_channel = 1
 
-    model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
+    model = torch.nn.DataParallel(resnet.__dict__[args.arch](args.width, classes, in_channel))
     model.cuda()
 
     # optionally resume from a checkpoint
@@ -86,26 +104,55 @@ def main():
 
     cudnn.benchmark = True
 
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    if args.dataset == "CIFAR100":
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_loader = torch.utils.data.DataLoader(
-        datasets.CIFAR100(root='./data', train=True, transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, 4),
-            transforms.ToTensor(),
-            normalize,
-        ]), download=True),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
+        if args.Strong_Aug:
+            train_loader = torch.utils.data.DataLoader(
+                datasets.CIFAR100(root='./data', train=True, transform=transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomCrop(32, 4),
+                    AutoAugment(policy=AutoAugmentPolicy.CIFAR10),
+                    transforms.ToTensor(),
+                    normalize,
+                ]), download=True),
+                batch_size=args.batch_size, shuffle=True,
+                num_workers=args.workers, pin_memory=True)
+        else:
+            train_loader = torch.utils.data.DataLoader(
+                datasets.CIFAR100(root='./data', train=True, transform=transforms.Compose([
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomCrop(32, 4),
+                    transforms.ToTensor(),
+                    normalize,
+                ]), download=True),
+                batch_size=args.batch_size, shuffle=True,
+                num_workers=args.workers, pin_memory=True)
 
-    val_loader = torch.utils.data.DataLoader(
-        datasets.CIFAR100(root='./data', train=False, transform=transforms.Compose([
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=128, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+        val_loader = torch.utils.data.DataLoader(
+            datasets.CIFAR100(root='./data', train=False, transform=transforms.Compose([
+                transforms.ToTensor(),
+                normalize,
+            ])),
+            batch_size=128, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
+    else:
+        train_loader = torch.utils.data.DataLoader(
+            datasets.MNIST(root='./data', train=True, transform=transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(28, 4),
+                transforms.ToTensor()
+            ]), download=True),
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.workers, pin_memory=True)
+
+        val_loader = torch.utils.data.DataLoader(
+            datasets.MNIST(root='./data', train=False, transform=transforms.Compose([
+                transforms.ToTensor()
+            ])),
+            batch_size=128, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
@@ -125,21 +172,21 @@ def main():
     #     # then switch back. In this setup it will correspond for first epoch.
     #     for param_group in optimizer.param_groups:
     #         param_group['lr'] = args.lr*0.1
+    print(' train_loader.__len__()', train_loader.__len__())
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer = optimizer, max_lr = args.lr, epochs = args.epochs, steps_per_epoch = train_loader.__len__(), pct_start = 0.1, last_epoch=args.start_epoch-1)
 
 
     if args.evaluate:
         validate(val_loader, model, criterion)
         return
-    
-    writer = SummaryWriter(log_dir='./tb_log/')
+    logdir = './tensor_board_'+args.arch + '_'+ str(args.width) + args.dataset + "wd=" + str(args.weight_decay) + "sa=" + str(args.Strong_Aug) + "MaxLR=" + str(args.lr) + "epochs=" + str(args.epochs)
+    writer = SummaryWriter(log_dir=logdir)
 
     for epoch in range(args.start_epoch, args.epochs):
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
-        train_loss, train_prec1 = train(train_loader, model, criterion, optimizer, epoch)
-        lr_scheduler.step()
+        train_loss, train_prec1 = train(train_loader, model, criterion, optimizer, epoch, lr_scheduler)
         writer.add_scalar('train_loss', train_loss, epoch)
         writer.add_scalar('train_prec1', train_prec1, epoch)
 
@@ -152,20 +199,16 @@ def main():
         is_best = val_prec1 > best_prec1
         best_prec1 = max(val_prec1, best_prec1)
 
-        if epoch > 0 and epoch % args.save_every == 0:
+        if (epoch > 0 and epoch % args.save_every == 0) or epoch ==  args.epochs-1:
+            filename = str(epoch+1) + 'epochs.th'
             save_checkpoint({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
-
-        save_checkpoint({
-            'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+            }, is_best, filename=os.path.join(args.save_dir,  filename))
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, lr_scheduler):
     """
         Run one train epoch
     """
@@ -208,6 +251,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+        
+        lr_scheduler.step()
 
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
@@ -217,7 +262,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                       epoch, i, len(train_loader), batch_time=batch_time,
                       data_time=data_time, loss=losses, top1=top1))
-    return losses, top1
+    return losses.avg, top1.avg
 
 
 def validate(val_loader, model, criterion):
@@ -268,7 +313,7 @@ def validate(val_loader, model, criterion):
     print(' * Prec@1 {top1.avg:.3f}'
           .format(top1=top1))
 
-    return losses, top1.avg
+    return losses.avg, top1.avg
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     """
